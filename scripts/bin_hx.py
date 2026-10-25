@@ -253,7 +253,7 @@ def main() -> None:
     codes = encode_codes(dbz)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUT_DIR / f"reflektivitaet_{ts.astimezone(BERLIN):%Y%m%d_%H%M}"
+    out_path = OUT_DIR / f"hx_{ts.astimezone(BERLIN):%Y%m%d_%H%M}"
     np.ascontiguousarray(codes).tofile(out_path)
     print(f"Gespeichert: {out_path} ({w}x{h}, {codes.nbytes} Bytes)")
 
