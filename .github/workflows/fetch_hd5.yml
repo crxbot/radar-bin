@@ -25,6 +25,7 @@ jobs:
       berlin_date: ${{ steps.slot.outputs.berlin_date }}
       berlin_time: ${{ steps.slot.outputs.berlin_time }}
       run: ${{ steps.slot.outputs.run }}
+      slot_epoch: ${{ steps.slot.outputs.slot_epoch }}
     steps:
       - name: Set RUN and DATE (rounded to 5 min, UTC)
         id: slot
@@ -43,6 +44,7 @@ jobs:
             echo "berlin_date=$BERLIN_DATE"
             echo "berlin_time=$BERLIN_TIME"
             echo "run=${DATE}_${TIME}"
+            echo "slot_epoch=$SLOT_EPOCH"
           } >> "$GITHUB_OUTPUT"
 
           echo "UTC-Slot: ${DATE}_${TIME} | Berlin: ${BERLIN_DATE}_${BERLIN_TIME}"
@@ -54,19 +56,27 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     needs: prepare
-    timeout-minutes: 10 # Sicherheitsnetz, falls die Dateien nie erscheinen
+    timeout-minutes: 12 # Sicherheitsnetz (inkl. 3 min Wartezeit bei LiveAnalyse)
     strategy:
       fail-fast: false # eine fehlgeschlagene Pipeline stoppt die andere nicht
       matrix:
         include:
+          # HX ist frueh da -> startet sofort (Offset 0)
+          - name: reflektivitaet
+            script: scripts/bin_radar.py
+            meta_script: scripts/meta_hx.py
+            out_dir: output/hx
+            file_prefix: reflektivitaet
+            source: hx
+            start_offset: 0
+          # HymecNG + RV kommen spaeter -> Download startet erst 180 s nach dem Slot (:03, :08, :13 ...)
           - name: liveanalyse
             script: scripts/bin_hymecng.py
+            meta_script: scripts/meta_hymecng.py
             out_dir: output/hymecng
-            hymecng: true
-          - name: regenradar
-            script: scripts/bin_radar.py
-            out_dir: output/rv
-            hymecng: false
+            file_prefix: liveanalyse
+            source: live
+            start_offset: 180
     env:
       RUN: ${{ needs.prepare.outputs.run }}
       DATE: ${{ needs.prepare.outputs.date }}
@@ -77,7 +87,11 @@ jobs:
       NAME: ${{ matrix.name }}
       SCRIPT: ${{ matrix.script }}
       OUT_DIR: ${{ matrix.out_dir }}
-      NEED_HYMECNG: ${{ matrix.hymecng }}
+      META_SCRIPT: ${{ matrix.meta_script }}
+      FILE_PREFIX: ${{ matrix.file_prefix }}
+      SOURCE: ${{ matrix.source }}
+      START_OFFSET: ${{ matrix.start_offset }}
+      SLOT_EPOCH: ${{ needs.prepare.outputs.slot_epoch }}
       # R2: Praefix = Pipeline-Name (liveanalyse / regenradar), Dateien heissen <name>_<datum>_<zeit>
       R2_PREFIX: ${{ matrix.name }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
@@ -101,10 +115,42 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Download RV (und HymecNG bei LiveAnalyse) parallel (mit Retry)
+      # Wartet (nur LiveAnalyse) bis SLOT + START_OFFSET; Checkout/pip laufen davor schon
+      - name: Warten bis Start-Zeitpunkt
+        run: |
+          TARGET=$(( SLOT_EPOCH + START_OFFSET ))
+          NOW=$(date -u +%s)
+          if [ "$NOW" -lt "$TARGET" ]; then
+            echo "Warte $(( TARGET - NOW )) s bis $(date -u -d "@$TARGET" +%H:%M:%S) UTC ..."
+            sleep $(( TARGET - NOW ))
+          else
+            echo "Start-Zeitpunkt schon erreicht - weiter."
+          fi
+
+      - name: Download Quelldaten (mit Retry)
         run: |
           MAX_ATTEMPTS=50
           SLEEP_SECONDS=5
+
+          download_plain() {
+            local label="$1" url="$2" out_dir="$3" file_name="$4"
+            local out="${out_dir}/${file_name}" tmp="${RUNNER_TEMP}/${file_name}"
+            mkdir -p "$out_dir"
+            for i in $(seq 1 "$MAX_ATTEMPTS"); do
+              HTTP_CODE=$(curl -s -o "$tmp" -w "%{http_code}" \
+                --connect-timeout 10 --max-time 120 "$url" || echo "000")
+              if [ "$HTTP_CODE" = "200" ] && [ -s "$tmp" ]; then
+                mv "$tmp" "$out"
+                echo "[$label] Erfolgreich (Versuch $i/$MAX_ATTEMPTS): $out"
+                return 0
+              fi
+              echo "[$label] Versuch $i/$MAX_ATTEMPTS: Datei noch nicht verfuegbar (HTTP $HTTP_CODE)."
+              rm -f "$tmp"
+              sleep "$SLEEP_SECONDS"
+            done
+            echo "::error::[$label] ${file_name} nach $MAX_ATTEMPTS Versuchen nicht verfuegbar - Abbruch."
+            return 1
+          }
 
           download_rv() {
             OUT_DIR_RV="data/rv"
@@ -135,43 +181,20 @@ jobs:
             return 1
           }
 
-          download_hymecng() {
-            OUT_DIR_HY="data/hymecng"
-            mkdir -p "$OUT_DIR_HY"
-            FILE_NAME="composite_HymecNG_${DATE}_${TIME}_000-hd5"
-            URL="https://opendata.dwd.de/weather/radar/composite/hymecng/${FILE_NAME}"
-            OUT="${OUT_DIR_HY}/${FILE_NAME}"
-            TMP_FILE="${RUNNER_TEMP}/${FILE_NAME}"
-            for i in $(seq 1 "$MAX_ATTEMPTS"); do
-              HTTP_CODE=$(curl -s -o "$TMP_FILE" -w "%{http_code}" \
-                --connect-timeout 10 --max-time 120 "$URL" || echo "000")
-              if [ "$HTTP_CODE" = "200" ] && [ -s "$TMP_FILE" ]; then
-                mv "$TMP_FILE" "$OUT"
-                echo "[HymecNG] Erfolgreich (Versuch $i/$MAX_ATTEMPTS): $OUT"
-                return 0
-              fi
-              echo "[HymecNG] Versuch $i/$MAX_ATTEMPTS: Datei noch nicht verfuegbar (HTTP $HTTP_CODE)."
-              rm -f "$TMP_FILE"
-              sleep "$SLEEP_SECONDS"
-            done
-            echo "::error::[HymecNG] ${FILE_NAME} nach $MAX_ATTEMPTS Versuchen nicht verfuegbar - Abbruch."
-            return 1
-          }
-
-          download_rv &
-          PID_RV=$!
-          PID_HY=""
-          if [ "$NEED_HYMECNG" = "true" ]; then
-            download_hymecng &
+          if [ "$SOURCE" = "hx" ]; then
+            HX_FILE="composite_hx_${DATE}_${TIME}-hd5"
+            download_plain HX "https://opendata.dwd.de/weather/radar/composite/hx/${HX_FILE}" data/hx "$HX_FILE"
+          else
+            HY_FILE="composite_HymecNG_${DATE}_${TIME}_000-hd5"
+            download_rv &
+            PID_RV=$!
+            download_plain HymecNG "https://opendata.dwd.de/weather/radar/composite/hymecng/${HY_FILE}" data/hymecng "$HY_FILE" &
             PID_HY=$!
-          fi
-
-          STATUS=0
-          wait "$PID_RV" || STATUS=1
-          if [ -n "$PID_HY" ]; then
+            STATUS=0
+            wait "$PID_RV" || STATUS=1
             wait "$PID_HY" || STATUS=1
+            exit $STATUS
           fi
-          exit $STATUS
 
       - name: Generate data (${{ matrix.name }})
         run: python "$SCRIPT"
@@ -186,7 +209,7 @@ jobs:
 
       - name: Build metadata.json (mit bestehendem Stand mergen, auf ${{ env.MAX_KEEP }} Timesteps kuerzen)
         run: |
-          python scripts/generate_metadata.py output \
+          python "$META_SCRIPT" output \
             --run "$RUN" \
             --date "$BERLIN_DATE" \
             --existing ./metadata_prev.json \
@@ -196,14 +219,14 @@ jobs:
 
       - name: Gzip der Binaerdatei
         run: |
-          f="${OUT_DIR}/${NAME}_${BERLIN_DATE}_${BERLIN_TIME}"
+          f="${OUT_DIR}/${FILE_PREFIX}_${BERLIN_DATE}_${BERLIN_TIME}"
           gzip -9 -n -c "$f" > "$f.tmp" && mv "$f.tmp" "$f"
 
       - name: Upload neue Binaerdatei zu R2
         run: |
           aws s3 cp \
-            "${OUT_DIR}/${NAME}_${BERLIN_DATE}_${BERLIN_TIME}" \
-            "s3://${R2_BUCKET}/${R2_PREFIX}/${NAME}_${BERLIN_DATE}_${BERLIN_TIME}" \
+            "${OUT_DIR}/${FILE_PREFIX}_${BERLIN_DATE}_${BERLIN_TIME}" \
+            "s3://${R2_BUCKET}/${R2_PREFIX}/${FILE_PREFIX}_${BERLIN_DATE}_${BERLIN_TIME}" \
             --content-type application/gzip \
             --endpoint-url "$R2_ENDPOINT"
 
