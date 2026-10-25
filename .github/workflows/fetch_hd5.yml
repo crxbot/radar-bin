@@ -62,11 +62,11 @@ jobs:
       matrix:
         include:
           # HX ist frueh da -> startet sofort (Offset 0)
-          - name: reflektivitaet
-            script: scripts/bin_radar.py
+          - name: hx
+            script: scripts/bin_hx.py
             meta_script: scripts/meta_hx.py
             out_dir: output/hx
-            file_prefix: reflektivitaet
+            file_prefix: hx
             source: hx
             start_offset: 0
           # HymecNG + RV kommen spaeter -> Download startet erst 180 s nach dem Slot (:03, :08, :13 ...)
