@@ -18,13 +18,12 @@ import requests
 from pyproj import Transformer
 from scipy import ndimage
 
-from bin_hx import find_dbz_dataset as find_hx_dataset   # liegt im selben scripts/-Ordner
+from bin_px250 import COMP_PROJDEF, LL_X, LL_Y, build_composite   # liegt im selben scripts/-Ordner
 
 # --------------------------------------------------------------------------- #
 # Konfiguration
 # --------------------------------------------------------------------------- #
 SRC_DIR = Path("data/hymecng")
-HX_SRC_DIR = Path("data/hx")
 OUT_DIR = Path("output/hymecng")
 
 FILENAME_RE = re.compile(r"composite_HymecNG_(\d{8})_(\d{4})_(\d{3})-hd5")
@@ -100,10 +99,6 @@ def parse_timestamp(filename: str) -> datetime:
     date_str, time_str, _ = m.groups()
     naive = datetime.strptime(date_str + time_str, "%Y%m%d%H%M")
     return naive.replace(tzinfo=timezone.utc)
-
-
-def hx_path_for(ts: datetime) -> Path:
-    return HX_SRC_DIR / f"composite_hx_{ts:%Y%m%d}_{ts:%H%M}-hd5"
 
 
 def dbz_to_rain(dbz):
@@ -260,50 +255,32 @@ def lonlat_to_native_rowcol(lon, lat, grid: dict, to_proj: Transformer):
 # --------------------------------------------------------------------------- #
 # HX laden (250 m, dBZ) -> mm/h auf dem 1-km-Raster
 # --------------------------------------------------------------------------- #
-def load_hx_rate_native(hx_path: Path, class_grid: dict) -> np.ndarray:
-    """HX-Reflektivitaet -> Regenrate in mm/h auf dem HymecNG-Raster.
+def load_px250_rate_native(ts: datetime, class_grid: dict) -> np.ndarray:
+    """PX250-Komposit (250 m, dBZ) -> Regenrate in mm/h auf dem HymecNG-Raster (1 km).
 
     Reihenfolge: dBZ -> mm/h (pro 250-m-Pixel), dann Mittel ueber 4x4 Pixel.
-    undetect = 0 mm/h (zaehlt im Mittel mit), nodata = NaN (zaehlt nicht mit).
+    Gemessen, aber kein Echo = 0 mm/h (zaehlt im Mittel mit),
+    keine Radardaten = NaN (zaehlt nicht mit).
     """
-    with h5py.File(hx_path, "r") as f:
-        ds = find_hx_dataset(f)
-        raw = ds[()]
-        what = None
-        for grp in (ds.parent, ds.parent.parent, ds.file):
-            w_ = grp.get("what")
-            if w_ is not None and "gain" in w_.attrs:
-                what = w_
-                break
-        attrs = what.attrs if what is not None else {}
-        gain = _attr_float(attrs, "gain", HX_DEFAULT_GAIN)
-        offset = _attr_float(attrs, "offset", HX_DEFAULT_OFFSET)
-        nodata = _attr_float(attrs, "nodata", HX_DEFAULT_NODATA)
-        undetect = _attr_float(attrs, "undetect")
+    comp, cover = build_composite(ts)      # Komposit liegt im selben Raster wie frueher HX (4400 x 4800)
 
-        where = find_where_group(f)
-        if where is None:
-            raise RuntimeError("Keine 'where'-Projektionsinfo in der HX-Datei gefunden.")
-        hx_grid = extract_grid_info(where)
-
-    h, w = raw.shape
+    h, w = comp.shape
     fct = HX_FACTOR
     if (w, h) != (class_grid["xsize"] * fct, class_grid["ysize"] * fct):
         raise RuntimeError(
-            f"HX-Raster {w}x{h} passt nicht zum {fct}x{fct}-Faktor auf "
+            f"PX250-Raster {w}x{h} passt nicht zum {fct}x{fct}-Faktor auf "
             f"{class_grid['xsize']}x{class_grid['ysize']}."
         )
-    if abs(hx_grid["xscale"] * fct - class_grid["xscale"]) > 1e-6:
-        raise RuntimeError("HX-Pixelgroesse x 4 entspricht nicht der HymecNG-Pixelgroesse.")
+    to_comp = Transformer.from_crs("EPSG:4326", COMP_PROJDEF, always_xy=True)
+    x, y = to_comp.transform(class_grid["ll_lon"], class_grid["ll_lat"])
+    if abs(x - LL_X) > 1.0 or abs(y - LL_Y) > 1.0:
+        raise RuntimeError("PX250-Raster liegt nicht deckungsgleich auf dem HymecNG-Raster.")
 
-    dbz = raw.astype(np.float32) * np.float32(gain) + np.float32(offset)
+    dbz = comp
     if HX_MAX_DBZ is not None:
-        np.minimum(dbz, np.float32(HX_MAX_DBZ), out=dbz)
+        dbz = np.minimum(dbz, np.float32(HX_MAX_DBZ))     # NaN bleibt NaN
     rate = dbz_to_rain(dbz).astype(np.float32)
-    if undetect is not None:
-        rate[raw == undetect] = 0.0
-    if nodata is not None:
-        rate[raw == nodata] = np.nan
+    rate[cover & ~np.isfinite(comp)] = 0.0                 # gemessen, kein Echo
     del dbz
 
     blocks = rate.reshape(h // fct, fct, w // fct, fct)
@@ -314,7 +291,7 @@ def load_hx_rate_native(hx_path: Path, class_grid: dict) -> np.ndarray:
     ok = cnt > 0
     out[ok] = total[ok] / cnt[ok]
 
-    print(f"HX-Composite: {hx_path.name} ({w}x{h} -> {out.shape[1]}x{out.shape[0]}, mm/h)")
+    print(f"PX250-Komposit ({w}x{h} -> {out.shape[1]}x{out.shape[0]}, mm/h)")
     return out
 
 
@@ -513,15 +490,12 @@ def main() -> None:
 
     to_proj = Transformer.from_crs("EPSG:4326", grid["projdef"], always_xy=True)
 
-    # Regenrate aus HX laden (nativ, 1 km)
+    # Regenrate aus dem PX250-Komposit laden (250 m -> 1 km)
     rate = None
     try:
-        hx_path = hx_path_for(ts)
-        if not hx_path.exists():
-            raise FileNotFoundError(f"{hx_path} nicht gefunden")
-        rate = load_hx_rate_native(hx_path, grid)
+        rate = load_px250_rate_native(ts, grid)
     except (RuntimeError, ValueError, KeyError, OSError) as e:
-        print(f"Warnung: HX nicht verfuegbar ({e}). Nutze HymecNG-Fallback.", file=sys.stderr)
+        print(f"Warnung: PX250 nicht verfuegbar ({e}). Nutze HymecNG-Fallback.", file=sys.stderr)
 
     # Hybrid-Verfeinerung
     print("Wende Hybrid-Strategie an (HX + HymecNG)...")

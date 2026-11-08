@@ -9,17 +9,18 @@ from datetime import datetime, timezone
 FILENAME_RE = re.compile(r"^(?P<var_type>.+)_(?P<date>\d{8})_(?P<time>\d{4})$")
 
 # ------------------------------
-# Festes natives HX-Raster (250 m) - aendert sich nie, daher hart hinterlegt
+# Festes natives HX-Raster (250 m), auch fuer das PX250-Komposit - aendert sich nie, daher hart hinterlegt
 # ------------------------------
 GRID = {
     "format": "raw-uint8",
-    "product": "hx-reflectivity",
+    "product": "px250-reflectivity",
     "unit": "dBZ",
     "dbz_min": 0.0,
     "dbz_step": 1.0,
     "nodata": 255,
     "nodata_code": 255,
-    "max_code": 254,
+    "clear_code": 254,
+    "max_code": 253,
     "width": 4400,
     "height": 4800,
     "row_order": "north-to-south",

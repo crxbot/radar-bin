@@ -61,14 +61,14 @@ jobs:
       fail-fast: false # eine fehlgeschlagene Pipeline stoppt die andere nicht
       matrix:
         include:
-          # HX ist frueh da -> startet sofort (Offset 0)
-          - name: hx
-            script: scripts/bin_hx.py
-            meta_script: scripts/meta_hx.py
-            out_dir: output/hx
-            file_prefix: hx
-            source: hx
-            start_offset: 0
+          # PX250: 17 Standort-Radare zu einem Komposit, Download macht das Skript selbst
+          - name: px250
+            script: scripts/bin_px250.py
+            meta_script: scripts/meta_px250.py
+            out_dir: output/px250
+            file_prefix: px250
+            source: px250
+            start_offset: 60
           # HymecNG + HX kommen spaeter -> Download startet erst 180 s nach dem Slot (:03, :08, :13 ...)
           - name: liveanalyse
             script: scripts/bin_hymecng.py
@@ -152,21 +152,12 @@ jobs:
             return 1
           }
 
-          if [ "$SOURCE" = "hx" ]; then
-            HX_FILE="composite_hx_${DATE}_${TIME}-hd5"
-            download_plain HX "https://opendata.dwd.de/weather/radar/composite/hx/${HX_FILE}" data/hx "$HX_FILE"
+          if [ "$SOURCE" = "px250" ]; then
+            # PX250-Standortdaten laedt das Python-Skript selbst (17 Dateien, mit Warten/Retry)
+            echo "PX250: Download macht das Skript selbst."
           else
             HY_FILE="composite_HymecNG_${DATE}_${TIME}_000-hd5"
-            download_plain HymecNG "https://opendata.dwd.de/weather/radar/composite/hymecng/${HY_FILE}" data/hymecng "$HY_FILE" &
-            PID_HY=$!
-            # HX (250 m) liefert die Regenrate fuer die Hybrid-Strategie
-            HX_FILE="composite_hx_${DATE}_${TIME}-hd5"
-            download_plain HX "https://opendata.dwd.de/weather/radar/composite/hx/${HX_FILE}" data/hx "$HX_FILE" &
-            PID_HX=$!
-            STATUS=0
-            wait "$PID_HY" || STATUS=1
-            wait "$PID_HX" || STATUS=1
-            exit $STATUS
+            download_plain HymecNG "https://opendata.dwd.de/weather/radar/composite/hymecng/${HY_FILE}" data/hymecng "$HY_FILE"
           fi
 
       - name: Generate data (${{ matrix.name }})
