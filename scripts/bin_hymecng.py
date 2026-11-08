@@ -38,18 +38,18 @@ FILENAME_RE = re.compile(r"composite_HymecNG_(\d{8})_(\d{4})_(\d{3})-hd5")
 HAIL_CLASSES = {9, 10}
 
 RAIN_MMH_THRESHOLDS: list[tuple[float, float, int]] = [
-    (0.06, 0.1, 30),
+    (0.08, 0.1, 30),
     (0.1, 1.25, 31),
     (1.25, 10.0, 32),
     (10.0, float("inf"), 33),
 ]
 SNOW_MMH_THRESHOLDS: list[tuple[float, float, int]] = [
-    (0.06, 1.0, 71),
+    (0.08, 1.0, 71),
     (1.0, 4.0, 72),
     (4.0, float("inf"), 73),
 ]
 SLEET_MMH_THRESHOLDS: list[tuple[float, float, int]] = [
-    (0.06, 1.0, 61),
+    (0.08, 1.0, 61),
     (1.0, float("inf"), 62),
 ]
 
@@ -58,7 +58,7 @@ SLEET_TYPE_CODES = {6, 61, 62}
 FREEZING_RAIN_TYPE_CODES = {4, 5}
 HAIL_TYPE_CODES = {9, 10}
 
-MIN_PRECIP_RATE_MMH = 0.04
+MIN_PRECIP_RATE_MMH = 0.08
 
 NODATA_CLASS = -1
 NODATA_BYTE = 255
@@ -76,8 +76,8 @@ LIGHTNING_PRECIP_MMH_THRESHOLD = 0.1
 BERLIN = ZoneInfo("Europe/Berlin")
 
 # HX (250 m, dBZ) -> mm/h ueber Z-R-Beziehung, danach 4x4-Mittelung auf 1 km
-ZR_A = 200.0          # DWD/RADOLAN: Z = a * R^b
-ZR_B = 1.6
+ZR_A = 256.0          # DWD/RADOLAN: Z = a * R^b
+ZR_B = 1.42
 HX_FACTOR = 4           # 250 m -> 1 km
 HX_MAX_DBZ: float | None = 55.0   # Kappung (Hagel-Kontamination); None = aus
 HX_DEFAULT_GAIN = 0.5            # nur Fallback
