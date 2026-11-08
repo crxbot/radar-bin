@@ -128,7 +128,7 @@ def download_all(slot: datetime) -> dict[str, Path]:
         time.sleep(RETRY_SLEEP)
 
     if len(files) < MIN_SITES:
-        sys.exit(f"Nur {len(files)} von {len(SITES)} Standorten verfuegbar (min. {MIN_SITES}) - Abbruch.")
+        raise RuntimeError(f"Nur {len(files)} von {len(SITES)} Standorten verfuegbar (min. {MIN_SITES}) - Abbruch.")
     print(f"{len(files)}/{len(SITES)} Standorte vorhanden")
     return files
 
@@ -209,17 +209,9 @@ def encode_codes(comp: np.ndarray, cover: np.ndarray) -> np.ndarray:
     codes[valid] = np.clip(k, 0, MAX_CODE).astype(np.uint8)
     return codes
 
-
-# --------------------------------------------------------------------------- #
-# Main
-# --------------------------------------------------------------------------- #
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--time", help="Zeit in UTC, JJJJMMTTHHMM (sonst DATE/TIME aus Umgebung oder jetzt)")
-    args = parser.parse_args()
-
-    slot = get_slot(args.time)
-    print(f"Slot: {slot:%Y-%m-%d %H:%M} UTC")
+def build_composite(slot: datetime) -> tuple[np.ndarray, np.ndarray]:
+    """Laedt alle Standorte fuer den Slot und baut das Komposit im HX-Raster.
+    Rueckgabe: (comp [dBZ float32, NaN = kein Echo/keine Daten], cover [bool, Radar misst hier])."""
     files = download_all(slot)
 
     to_comp = Transformer.from_crs("EPSG:4326", COMP_PROJDEF, always_xy=True)
@@ -232,6 +224,21 @@ def main() -> None:
         except Exception as e:
             print(f"[{name}] Fehler: {e}")
 
+    return comp, cover
+
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--time", help="Zeit in UTC, JJJJMMTTHHMM (sonst DATE/TIME aus Umgebung oder jetzt)")
+    args = parser.parse_args()
+
+    slot = get_slot(args.time)
+    print(f"Slot: {slot:%Y-%m-%d %H:%M} UTC")
+
+    comp, cover = build_composite(slot)
     codes = encode_codes(comp, cover)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
