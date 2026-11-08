@@ -19,7 +19,6 @@ GRID = {
     "dbz_step": 1.0,
     "nodata": 255,
     "nodata_code": 255,
-    "clear_code": 254,
     "max_code": 253,
     "width": 4400,
     "height": 4800,

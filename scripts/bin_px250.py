@@ -58,8 +58,7 @@ TOP_Y = LL_Y + HEIGHT * PIXEL_M              # obere Kante (= 125.0)
 
 DBZ_MIN = 0.0
 DBZ_STEP = 1.0
-MAX_CODE = 253
-CLEAR_CODE = 254        # gemessen, aber kein Echo
+MAX_CODE = 254
 NODATA_CODE = 255       # keine Radardaten
 
 BERLIN = ZoneInfo("Europe/Berlin")
@@ -204,7 +203,7 @@ def place_site(site: dict, to_comp: Transformer, comp: np.ndarray, cover: np.nda
 
 def encode_codes(comp: np.ndarray, cover: np.ndarray) -> np.ndarray:
     codes = np.full(comp.shape, NODATA_CODE, dtype=np.uint8)
-    codes[cover] = CLEAR_CODE
+    codes[cover] = 0
     valid = np.isfinite(comp) & (comp >= DBZ_MIN - 1e-6)
     k = np.floor((comp[valid] - DBZ_MIN) / DBZ_STEP + 1e-6)
     codes[valid] = np.clip(k, 0, MAX_CODE).astype(np.uint8)
