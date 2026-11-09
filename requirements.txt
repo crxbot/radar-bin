@@ -5,3 +5,4 @@ pyproj>=3.8.0
 Pillow>=13.0.0
 requests>=2.34.2
 tzdata>=2026.6
+wradlib>=2.9.8
