@@ -23,6 +23,7 @@ import h5py
 import numpy as np
 import requests
 import wradlib as wrl
+from scipy import ndimage
 from pyproj import Transformer
 
 BASE_URL = "https://opendata.dwd.de/weather/radar/sites/px250"
@@ -57,6 +58,11 @@ BERLIN = ZoneInfo("Europe/Berlin")
 WEIGHT_POWER = 2.0      # Qualitaet = 1 / max(r_km, MIN_R_KM) ** WEIGHT_POWER
 MIN_R_KM = 1.0
 BAND_ROWS = 400         # Komposit zeilenweise in Baendern -> wenig Speicher
+
+# Filter gegen Fehlechos am Rand / in der Fernzone (pro Standort, VOR dem Komposit)
+MAX_RANGE_KM = 150.0    # jenseits davon liefert ein Standort weder Echo noch Abdeckung
+EDGE_ERODE_PX = 4       # Abdeckungsrand um so viele Pixel (1 px = 250 m) nach innen schieben
+MIN_NEIGHBORS = 3       # Echo-Pixel braucht >= so viele Echo-Nachbarn im 3x3-Fenster (0 = aus)
 
 
 # --------------------------------------------------------------------------- #
@@ -176,12 +182,32 @@ def read_site(path):
 # --------------------------------------------------------------------------- #
 # Komposit
 # --------------------------------------------------------------------------- #
+def clean_site(site):
+    """Entfernt Randartefakte eines Standortbilds:
+    1. Abdeckung am aeusseren Rand (letzte Entfernungstore, Sektorraender) nach innen schieben
+    2. isolierte Einzelpixel (Rauschen/Speckle) entfernen, nur Echo mit genug Echo-Nachbarn bleibt"""
+    dbz, cov = site["dbz"], site["covered"]
+    if EDGE_ERODE_PX > 0:
+        cov = ndimage.binary_erosion(cov, structure=np.ones((3, 3), bool),
+                                     iterations=EDGE_ERODE_PX, border_value=1)
+    echo = np.isfinite(dbz) & (dbz >= DBZ_MIN - 1e-6) & cov
+    if MIN_NEIGHBORS > 0:
+        kernel = np.ones((3, 3), np.uint8)
+        kernel[1, 1] = 0
+        nb = ndimage.convolve(echo.astype(np.uint8), kernel, mode="constant", cval=0)
+        echo &= nb >= MIN_NEIGHBORS
+    return np.where(echo, dbz, np.nan).astype(np.float32), cov
+
+
 def prepare_site(site, to_comp, name):
     """Sortiert ein Standortbild ins HX-Raster ein (reine Pixelverschiebung) und liefert
     ausgeschnittene Teilfelder: lineares Z (NaN = kein Echo), Qualitaet, Abdeckung."""
     if abs(site["xscale"] - PIXEL_M) > 1e-6 or abs(site["yscale"] - PIXEL_M) > 1e-6:
         print(f"[{name}] uebersprungen: Pixelgroesse {site['xscale']} m statt {PIXEL_M} m")
         return None
+
+    site = dict(site)
+    site["dbz"], site["covered"] = clean_site(site)
 
     ny, nx = site["dbz"].shape
     x_ll, y_ll = to_comp.transform(site["ll_lon"], site["ll_lat"])
@@ -215,8 +241,12 @@ def prepare_site(site, to_comp, name):
     r_km = np.hypot(rows - rr, cols - rc) * PIXEL_M / 1000.0
     quality = 1.0 / np.maximum(r_km, MIN_R_KM) ** WEIGHT_POWER
 
+    # Reichweitenbegrenzung: Echo UND Abdeckung nur innerhalb MAX_RANGE_KM
+    in_range = r_km <= MAX_RANGE_KM
+    covered = covered & in_range
+
     # Nur Echo >= DBZ_MIN zaehlt; Mittelung in linearem Z (nicht in dBZ!)
-    has_echo = np.isfinite(dbz) & (dbz >= DBZ_MIN - 1e-6)
+    has_echo = np.isfinite(dbz) & (dbz >= DBZ_MIN - 1e-6) & in_range
     z = np.where(has_echo, 10.0 ** (dbz / 10.0), np.nan)
     quality = np.where(has_echo, quality, np.nan)     # ohne Echo kein Gewicht
 
