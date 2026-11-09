@@ -2,10 +2,10 @@
 """PX250-Standortdaten (DWD, 17 Radare, ODIM-HDF5) -> ein Komposit im NATIVEN HX-Raster (250 m).
 
 Ueberlappung (wradlib.comp):
-  - nur ein Radar meldet Echo (>= 0 dBZ)  -> dieser Wert gilt (keine Zellen verlieren)
-  - mehrere melden Echo                    -> weighted: gewichtetes Mittel in linearem Z, Gewicht 1/r^2
-                                              ko: Radar mit bester Qualitaet (= naechster) gewinnt
-  - "kein Echo" eines Radars hat kein Gewicht und verduennt nie das Echo eines anderen
+  Gewicht = exp(-r/D) (steil, Zhang et al. 2005), nur die MAX_RADARS besten Radare je Pixel.
+  weighted: gewichtetes Mittel in linearem Z; ko: naechster Radar gewinnt.
+  NOECHO_AS_ZERO: misst ein naeherer Radar "kein Echo", verduennt das ein Fernbereichs-Echo
+  des anderen Radars (statt es wie beim Maximum ungeprueft zu uebernehmen).
 
 Pixel-Codes: 0..253 = floor(dBZ), 254 reserviert, 255 = keine Radardaten.
 Layout: HEIGHT x WIDTH, row-major, Zeile 0 = Norden, keine Dateiendung.
@@ -55,8 +55,9 @@ NODATA_CODE = 255
 BERLIN = ZoneInfo("Europe/Berlin")
 
 # Komposition mit wradlib
-WEIGHT_POWER = 2.0      # Qualitaet = 1 / max(r_km, MIN_R_KM) ** WEIGHT_POWER
-MIN_R_KM = 1.0
+WEIGHT_D_KM = 40.0      # Gewicht = exp(-r / D); kleiner = naeherer Radar dominiert staerker (Zhang: 25-50 km)
+MAX_RADARS = 2          # pro Pixel nur die N Radare mit dem hoechsten Gewicht beruecksichtigen (Jurczyk: 2)
+NOECHO_AS_ZERO = True   # "Radar misst, aber kein Echo" zaehlt als Z=0 mit Gewicht (verduennt Fernbereichs-Fehlechos)
 BAND_ROWS = 400         # Komposit zeilenweise in Baendern -> wenig Speicher
 
 # Filter gegen Fehlechos am Rand / in der Fernzone (pro Standort, VOR dem Komposit)
@@ -239,16 +240,19 @@ def prepare_site(site, to_comp, name):
     rows = np.arange(r0, r1, dtype=np.float64)[:, None]
     cols = np.arange(c0, c1, dtype=np.float64)[None, :]
     r_km = np.hypot(rows - rr, cols - rc) * PIXEL_M / 1000.0
-    quality = 1.0 / np.maximum(r_km, MIN_R_KM) ** WEIGHT_POWER
+    quality = np.exp(-r_km / WEIGHT_D_KM)
 
     # Reichweitenbegrenzung: Echo UND Abdeckung nur innerhalb MAX_RANGE_KM
     in_range = r_km <= MAX_RANGE_KM
     covered = covered & in_range
 
-    # Nur Echo >= DBZ_MIN zaehlt; Mittelung in linearem Z (nicht in dBZ!)
+    # Mittelung in linearem Z (nicht in dBZ!)
     has_echo = np.isfinite(dbz) & (dbz >= DBZ_MIN - 1e-6) & in_range
-    z = np.where(has_echo, 10.0 ** (dbz / 10.0), np.nan)
-    quality = np.where(has_echo, quality, np.nan)     # ohne Echo kein Gewicht
+    z = np.full(dbz.shape, np.nan)
+    if NOECHO_AS_ZERO:
+        z[covered] = 0.0                      # Radar misst hier, aber kein Echo
+    z[has_echo] = 10.0 ** (dbz[has_echo] / 10.0)
+    quality = np.where(np.isfinite(z), quality, np.nan)
 
     print(f"[{name}] Spalte {col0}, Zeile {row0}; Radarposition {src}: Spalte {rc:.0f}, Zeile {rr:.0f}")
     return {"name": name, "r0": r0, "r1": r1, "c0": c0, "c1": c1,
@@ -280,6 +284,15 @@ def compose_bands(placed, method="weighted"):
         if not grids:
             continue
 
+        if MAX_RADARS and len(grids) > MAX_RADARS:
+            gz_all, gq_all = np.stack(grids), np.stack(quals)
+            q_srt = np.where(np.isnan(gq_all), -np.inf, gq_all)
+            thr = np.sort(q_srt, axis=0)[-MAX_RADARS]          # N-hoechstes Gewicht je Pixel
+            drop = q_srt < thr
+            gz_all[drop] = np.nan
+            gq_all[drop] = np.nan
+            grids, quals = list(gz_all), list(gq_all)
+
         with np.errstate(invalid="ignore", divide="ignore"):
             if len(grids) == 1:
                 z = grids[0]
@@ -287,7 +300,7 @@ def compose_bands(placed, method="weighted"):
                 z = wrl.comp.compose_ko(list(grids), list(quals))   # nimmt Listen mit append -> Kopien
             else:
                 z = wrl.comp.compose_weighted(grids, quals)
-            comp[b0:b1] = 10.0 * np.log10(z)                       # zurueck nach dBZ (NaN bleibt NaN)
+            comp[b0:b1] = np.where(z > 0, 10.0 * np.log10(np.where(z > 0, z, 1.0)), np.nan)   # zurueck nach dBZ
     return comp, cover
 
 
