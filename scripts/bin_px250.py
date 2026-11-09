@@ -61,9 +61,9 @@ NOECHO_AS_ZERO = True   # "Radar misst, aber kein Echo" zaehlt als Z=0 mit Gewic
 BAND_ROWS = 400         # Komposit zeilenweise in Baendern -> wenig Speicher
 
 # Filter gegen Fehlechos am Rand / in der Fernzone (pro Standort, VOR dem Komposit)
-MAX_RANGE_KM = 150.0    # jenseits davon liefert ein Standort weder Echo noch Abdeckung
-EDGE_ERODE_PX = 4       # Abdeckungsrand um so viele Pixel (1 px = 250 m) nach innen schieben
-MIN_NEIGHBORS = 3       # Echo-Pixel braucht >= so viele Echo-Nachbarn im 3x3-Fenster (0 = aus)
+MAX_RANGE_KM = None     # None = AUS (keine harte Reichweitengrenze); z.B. 150.0 = Standort endet dort
+EDGE_ERODE_PX = 0       # 0 = AUS; Abdeckungsrand um so viele Pixel (1 px = 250 m) nach innen schieben
+MIN_NEIGHBORS = 0       # 0 = AUS; Echo-Pixel braucht >= so viele Echo-Nachbarn im 3x3-Fenster (0 = aus)
 
 
 # --------------------------------------------------------------------------- #
@@ -243,7 +243,7 @@ def prepare_site(site, to_comp, name):
     quality = np.exp(-r_km / WEIGHT_D_KM)
 
     # Reichweitenbegrenzung: Echo UND Abdeckung nur innerhalb MAX_RANGE_KM
-    in_range = r_km <= MAX_RANGE_KM
+    in_range = (r_km <= MAX_RANGE_KM) if MAX_RANGE_KM else np.ones(r_km.shape, bool)
     covered = covered & in_range
 
     # Mittelung in linearem Z (nicht in dBZ!)
