@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """PX250-Standortdaten (DWD, 17 Radare, ODIM-HDF5) -> ein Komposit im NATIVEN HX-Raster (250 m).
 
-Ueberlappung (Mischlogik):
+Ueberlappung (wradlib.comp):
   - nur ein Radar meldet Echo (>= 0 dBZ)  -> dieser Wert gilt (keine Zellen verlieren)
-  - beide melden Echo                      -> der Radar mit der kleineren Entfernung zum Pixel gewinnt
-  - "kein Echo" eines Radars ueberschreibt nie das Echo eines anderen
+  - mehrere melden Echo                    -> weighted: gewichtetes Mittel in linearem Z, Gewicht 1/r^2
+                                              ko: Radar mit bester Qualitaet (= naechster) gewinnt
+  - "kein Echo" eines Radars hat kein Gewicht und verduennt nie das Echo eines anderen
 
 Pixel-Codes: 0..253 = floor(dBZ), 254 reserviert, 255 = keine Radardaten.
 Layout: HEIGHT x WIDTH, row-major, Zeile 0 = Norden, keine Dateiendung.
@@ -21,6 +22,7 @@ from zoneinfo import ZoneInfo
 import h5py
 import numpy as np
 import requests
+import wradlib as wrl
 from pyproj import Transformer
 
 BASE_URL = "https://opendata.dwd.de/weather/radar/sites/px250"
@@ -50,6 +52,11 @@ MAX_CODE = 254
 NODATA_CODE = 255
 
 BERLIN = ZoneInfo("Europe/Berlin")
+
+# Komposition mit wradlib
+WEIGHT_POWER = 2.0      # Qualitaet = 1 / max(r_km, MIN_R_KM) ** WEIGHT_POWER
+MIN_R_KM = 1.0
+BAND_ROWS = 400         # Komposit zeilenweise in Baendern -> wenig Speicher
 
 
 # --------------------------------------------------------------------------- #
@@ -169,12 +176,12 @@ def read_site(path):
 # --------------------------------------------------------------------------- #
 # Komposit
 # --------------------------------------------------------------------------- #
-def place_site(site, to_comp, comp, cover, echo_dist, name):
-    """Legt das Standortbild ins HX-Raster. echo_dist = Entfernung (Pixel) des Radars,
-    dessen Echo-Wert aktuell im Pixel steht (inf = noch kein Echo)."""
+def prepare_site(site, to_comp, name):
+    """Sortiert ein Standortbild ins HX-Raster ein (reine Pixelverschiebung) und liefert
+    ausgeschnittene Teilfelder: lineares Z (NaN = kein Echo), Qualitaet, Abdeckung."""
     if abs(site["xscale"] - PIXEL_M) > 1e-6 or abs(site["yscale"] - PIXEL_M) > 1e-6:
         print(f"[{name}] uebersprungen: Pixelgroesse {site['xscale']} m statt {PIXEL_M} m")
-        return
+        return None
 
     ny, nx = site["dbz"].shape
     x_ll, y_ll = to_comp.transform(site["ll_lon"], site["ll_lat"])
@@ -189,13 +196,12 @@ def place_site(site, to_comp, comp, cover, echo_dist, name):
     c0, c1 = max(col0, 0), min(col0 + nx, WIDTH)
     if r0 >= r1 or c0 >= c1:
         print(f"[{name}] liegt ausserhalb des Rasters")
-        return
-    sr0, sc0 = r0 - row0, c0 - col0
-    sl = (slice(sr0, sr0 + (r1 - r0)), slice(sc0, sc0 + (c1 - c0)))
-    sub_d = site["dbz"][sl]
-    sub_c = site["covered"][sl]
+        return None
+    sl = (slice(r0 - row0, r1 - row0), slice(c0 - col0, c1 - col0))
+    dbz = site["dbz"][sl].astype(np.float64)
+    covered = site["covered"][sl]
 
-    # Radarposition im HX-Raster (Pixel, Zeile/Spalte)
+    # Radarposition im HX-Raster (Pixel)
     if site["radar_lonlat"] is not None:
         xr, yr = to_comp.transform(*site["radar_lonlat"])
         rc, rr = (xr - LL_X) / PIXEL_M, (TOP_Y - yr) / PIXEL_M
@@ -204,48 +210,80 @@ def place_site(site, to_comp, comp, cover, echo_dist, name):
         rc, rr = col0 + nx / 2.0, row0 + ny / 2.0
         src = "Bildmitte (Annahme)"
 
-    rows = np.arange(r0, r1, dtype=np.float32)[:, None]
-    cols = np.arange(c0, c1, dtype=np.float32)[None, :]
-    dist = np.hypot(rows - rr, cols - rc).astype(np.float32)
+    rows = np.arange(r0, r1, dtype=np.float64)[:, None]
+    cols = np.arange(c0, c1, dtype=np.float64)[None, :]
+    r_km = np.hypot(rows - rr, cols - rc) * PIXEL_M / 1000.0
+    quality = 1.0 / np.maximum(r_km, MIN_R_KM) ** WEIGHT_POWER
 
-    cur = comp[r0:r1, c0:c1]
-    cur_dist = echo_dist[r0:r1, c0:c1]
+    # Nur Echo >= DBZ_MIN zaehlt; Mittelung in linearem Z (nicht in dBZ!)
+    has_echo = np.isfinite(dbz) & (dbz >= DBZ_MIN - 1e-6)
+    z = np.where(has_echo, 10.0 ** (dbz / 10.0), np.nan)
+    quality = np.where(has_echo, quality, np.nan)     # ohne Echo kein Gewicht
 
-    # Echo dieses Radars: gueltig und >= DBZ_MIN
-    has_echo = np.isfinite(sub_d) & (sub_d >= DBZ_MIN - 1e-6)
-    # gewinnt, wo noch kein Echo steht oder dieser Radar naeher dran ist
-    wins = has_echo & (dist < cur_dist)
-    cur[wins] = sub_d[wins]
-    cur_dist[wins] = dist[wins]
+    print(f"[{name}] Spalte {col0}, Zeile {row0}; Radarposition {src}: Spalte {rc:.0f}, Zeile {rr:.0f}")
+    return {"name": name, "r0": r0, "r1": r1, "c0": c0, "c1": c1,
+            "z": z.astype(np.float32), "q": quality.astype(np.float32), "cover": covered}
 
-    cover[r0:r1, c0:c1] |= sub_c
-    print(f"[{name}] bei Spalte {col0}, Zeile {row0}; Radarposition {src}: Spalte {rc:.0f}, Zeile {rr:.0f}")
+
+def compose_bands(placed, method="weighted"):
+    """Komposit mit wradlib. Pro Zeilenband werden alle ueberlappenden Standorte auf volle
+    Bandbreite gelegt und mit wrl.comp.compose_weighted / compose_ko zusammengefuehrt.
+    Rueckgabe: (comp [dBZ float32, NaN = kein Echo], cover [bool])."""
+    comp = np.full((HEIGHT, WIDTH), np.nan, dtype=np.float32)
+    cover = np.zeros((HEIGHT, WIDTH), dtype=bool)
+    for p in placed:
+        cover[p["r0"]:p["r1"], p["c0"]:p["c1"]] |= p["cover"]
+
+    for b0 in range(0, HEIGHT, BAND_ROWS):
+        b1 = min(b0 + BAND_ROWS, HEIGHT)
+        grids, quals = [], []
+        for p in placed:
+            r0, r1 = max(p["r0"], b0), min(p["r1"], b1)
+            if r0 >= r1:
+                continue
+            gz = np.full((b1 - b0, WIDTH), np.nan, dtype=np.float32)
+            gq = np.full((b1 - b0, WIDTH), np.nan, dtype=np.float32)
+            gz[r0 - b0:r1 - b0, p["c0"]:p["c1"]] = p["z"][r0 - p["r0"]:r1 - p["r0"]]
+            gq[r0 - b0:r1 - b0, p["c0"]:p["c1"]] = p["q"][r0 - p["r0"]:r1 - p["r0"]]
+            grids.append(gz)
+            quals.append(gq)
+        if not grids:
+            continue
+
+        with np.errstate(invalid="ignore", divide="ignore"):
+            if len(grids) == 1:
+                z = grids[0]
+            elif method == "ko":
+                z = wrl.comp.compose_ko(list(grids), list(quals))   # nimmt Listen mit append -> Kopien
+            else:
+                z = wrl.comp.compose_weighted(grids, quals)
+            comp[b0:b1] = 10.0 * np.log10(z)                       # zurueck nach dBZ (NaN bleibt NaN)
+    return comp, cover
 
 
 def encode_codes(comp, cover):
     codes = np.full(comp.shape, NODATA_CODE, dtype=np.uint8)
     codes[cover] = 0
-    valid = np.isfinite(comp) & (comp >= DBZ_MIN - 1e-6)
-    k = np.floor((comp[valid] - DBZ_MIN) / DBZ_STEP + 1e-6)
+    valid = np.isfinite(comp) & (comp >= DBZ_MIN - 1e-3)
+    k = np.floor((comp[valid] - DBZ_MIN) / DBZ_STEP + 1e-3)       # Toleranz gegen Rundung Z<->dBZ
     codes[valid] = np.clip(k, 0, MAX_CODE).astype(np.uint8)
     return codes
 
 
-def build_composite(slot):
+def build_composite(slot, method="weighted"):
     files = download_all(slot)
-
     to_comp = Transformer.from_crs("EPSG:4326", COMP_PROJDEF, always_xy=True)
-    comp = np.full((HEIGHT, WIDTH), np.nan, dtype=np.float32)
-    cover = np.zeros((HEIGHT, WIDTH), dtype=bool)
-    echo_dist = np.full((HEIGHT, WIDTH), np.inf, dtype=np.float32)
 
+    placed = []
     for name, path in files.items():
         try:
-            place_site(read_site(path), to_comp, comp, cover, echo_dist, name)
+            p = prepare_site(read_site(path), to_comp, name)
+            if p is not None:
+                placed.append(p)
         except Exception as e:
             print(f"[{name}] Fehler: {e}")
 
-    return comp, cover
+    return compose_bands(placed, method)
 
 
 # --------------------------------------------------------------------------- #
@@ -254,12 +292,14 @@ def build_composite(slot):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--time", help="UTC, JJJJMMTTHHMM")
+    parser.add_argument("--method", choices=["weighted", "ko"], default="weighted",
+                        help="weighted = Mittel (1/r^2, linear Z); ko = bester (naechster) Radar")
     args = parser.parse_args()
 
     slot = get_slot(args.time)
     print(f"Slot: {slot:%Y-%m-%d %H:%M} UTC")
 
-    comp, cover = build_composite(slot)
+    comp, cover = build_composite(slot, args.method)
     codes = encode_codes(comp, cover)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
