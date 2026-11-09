@@ -165,6 +165,7 @@ def read_site(path):
         undetect = _scalar(what["undetect"]) if "undetect" in what else None
         raw = f["dataset1/data1/data"][()]
         radar_lonlat = _find_radar_lonlat(f)
+        projdef = _scalar(w["projdef"]) if "projdef" in w else None
 
     dbz = raw.astype(np.float32) * np.float32(gain) + np.float32(offset)
     dbz[raw == nodata] = np.nan
@@ -177,6 +178,7 @@ def read_site(path):
         "ll_lon": ll_lon, "ll_lat": ll_lat,
         "xscale": xscale, "yscale": yscale,
         "radar_lonlat": radar_lonlat,
+        "projdef": projdef,
     }
 
 
@@ -200,7 +202,7 @@ def clean_site(site):
     return np.where(echo, dbz, np.nan).astype(np.float32), cov
 
 
-def prepare_site(site, to_comp, name):
+def prepare_site(site, to_comp, name):  # to_comp bleibt fuer Kompatibilitaet
     """Sortiert ein Standortbild ins HX-Raster ein (reine Pixelverschiebung) und liefert
     ausgeschnittene Teilfelder: lineares Z (NaN = kein Echo), Qualitaet, Abdeckung."""
     if abs(site["xscale"] - PIXEL_M) > 1e-6 or abs(site["yscale"] - PIXEL_M) > 1e-6:
@@ -211,31 +213,46 @@ def prepare_site(site, to_comp, name):
     site["dbz"], site["covered"] = clean_site(site)
 
     ny, nx = site["dbz"].shape
-    x_ll, y_ll = to_comp.transform(site["ll_lon"], site["ll_lat"])
-    col_f = (x_ll - LL_X) / PIXEL_M
-    row_f = (TOP_Y - (y_ll + ny * PIXEL_M)) / PIXEL_M
-    col0, row0 = int(round(col_f)), int(round(row_f))
-    resid = max(abs(col_f - col0), abs(row_f - row0))
-    if resid > 0.1:
-        print(f"[{name}] WARNUNG: Raster nicht pixelgenau (Rest {resid:.2f} px)")
+    site_proj = site.get("projdef") or COMP_PROJDEF
+    # Die Standortbilder liegen NICHT auf dem HX-Gitter (Rest 0.1-0.5 px je Standort) -> echt umprojizieren:
+    # jeden HX-Pixelmittelpunkt in die Standortprojektion bringen und dort den naechsten Pixel nehmen.
+    t_ll = Transformer.from_crs("EPSG:4326", site_proj, always_xy=True)
+    x_ll, y_ll = t_ll.transform(site["ll_lon"], site["ll_lat"])      # untere linke ECKE des Bildes
+    t_s2h = Transformer.from_crs(site_proj, COMP_PROJDEF, always_xy=True)
+    t_h2s = Transformer.from_crs(COMP_PROJDEF, site_proj, always_xy=True)
 
-    r0, r1 = max(row0, 0), min(row0 + ny, HEIGHT)
-    c0, c1 = max(col0, 0), min(col0 + nx, WIDTH)
+    # Footprint des Standortbildes im HX-Raster (HX-Pixelmitte: X = Spalte*250, Y = -Zeile*250)
+    cx = np.array([x_ll, x_ll + nx * site["xscale"], x_ll, x_ll + nx * site["xscale"]])
+    cy = np.array([y_ll, y_ll, y_ll + ny * site["yscale"], y_ll + ny * site["yscale"]])
+    hx, hy = t_s2h.transform(cx, cy)
+    c0 = max(int(np.floor(hx.min() / PIXEL_M)) - 2, 0)
+    c1 = min(int(np.ceil(hx.max() / PIXEL_M)) + 3, WIDTH)
+    r0 = max(int(np.floor(-hy.max() / PIXEL_M)) - 2, 0)
+    r1 = min(int(np.ceil(-hy.min() / PIXEL_M)) + 3, HEIGHT)
     if r0 >= r1 or c0 >= c1:
         print(f"[{name}] liegt ausserhalb des Rasters")
         return None
-    sl = (slice(r0 - row0, r1 - row0), slice(c0 - col0, c1 - col0))
-    dbz = site["dbz"][sl].astype(np.float64)
-    covered = site["covered"][sl]
 
-    # Radarposition im HX-Raster (Pixel)
+    gx = (np.arange(c0, c1, dtype=np.float64) * PIXEL_M)[None, :] * np.ones((r1 - r0, 1))
+    gy = (-np.arange(r0, r1, dtype=np.float64) * PIXEL_M)[:, None] * np.ones((1, c1 - c0))
+    sx, sy = t_h2s.transform(gx, gy)
+    jj = np.rint((sx - x_ll) / site["xscale"] - 0.5).astype(np.int64)       # Spalte im Standortbild
+    ii = np.rint(ny - 0.5 - (sy - y_ll) / site["yscale"]).astype(np.int64)  # Zeile (0 = Norden)
+    ok = (jj >= 0) & (jj < nx) & (ii >= 0) & (ii < ny)
+    dbz = np.full(jj.shape, np.nan)
+    covered = np.zeros(jj.shape, bool)
+    dbz[ok] = site["dbz"][ii[ok], jj[ok]]
+    covered[ok] = site["covered"][ii[ok], jj[ok]]
+
+    # Radarposition im HX-Raster (Pixelindex-Einheiten)
     if site["radar_lonlat"] is not None:
-        xr, yr = to_comp.transform(*site["radar_lonlat"])
-        rc, rr = (xr - LL_X) / PIXEL_M, (TOP_Y - yr) / PIXEL_M
+        xr, yr = Transformer.from_crs("EPSG:4326", COMP_PROJDEF, always_xy=True).transform(*site["radar_lonlat"])
         src = "aus Datei"
     else:
-        rc, rr = col0 + nx / 2.0, row0 + ny / 2.0
+        xr, yr = t_s2h.transform(x_ll + nx * site["xscale"] / 2.0, y_ll + ny * site["yscale"] / 2.0)
         src = "Bildmitte (Annahme)"
+    rc, rr = xr / PIXEL_M, -yr / PIXEL_M
+    col0, row0 = c0, r0
 
     rows = np.arange(r0, r1, dtype=np.float64)[:, None]
     cols = np.arange(c0, c1, dtype=np.float64)[None, :]
@@ -254,7 +271,8 @@ def prepare_site(site, to_comp, name):
     z[has_echo] = 10.0 ** (dbz[has_echo] / 10.0)
     quality = np.where(np.isfinite(z), quality, np.nan)
 
-    print(f"[{name}] Spalte {col0}, Zeile {row0}; Radarposition {src}: Spalte {rc:.0f}, Zeile {rr:.0f}")
+    print(f"[{name}] Projektion {'aus Datei' if site.get('projdef') else 'HX (Annahme)'}; Ausschnitt Spalte {c0}-{c1}, Zeile {r0}-{r1}; "
+          f"Radarposition {src}: Spalte {rc:.1f}, Zeile {rr:.1f}")
     return {"name": name, "r0": r0, "r1": r1, "c0": c0, "c1": c1,
             "z": z.astype(np.float32), "q": quality.astype(np.float32), "cover": covered}
 
