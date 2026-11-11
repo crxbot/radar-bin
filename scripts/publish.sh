@@ -29,9 +29,8 @@ aws s3 cp "$F" "${S3}/$(basename "$F")" --content-type application/gzip "${EP[@]
 
 LATEST="${OUT_DIR}/${FILE_PREFIX}_latest"
 if [ "$NAME" = "liveanalyse" ] && [ -f "$LATEST" ]; then
-  gzip -9 -n -c "$LATEST" > "$LATEST.tmp" && mv "$LATEST.tmp" "$LATEST"
   aws s3 cp "$LATEST" "s3://${R2_BUCKET}/hymecng/${FILE_PREFIX}_latest" \
-    --content-type application/gzip --cache-control "no-cache" "${EP[@]}"
+    --content-type application/octet-stream --cache-control "no-cache" "${EP[@]}"
 fi
 
 # metadata erst NACH der Binaerdatei, damit Clients nie auf fehlende Dateien verweisen
