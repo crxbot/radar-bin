@@ -54,8 +54,16 @@ jobs:
           HY_FILE="composite_HymecNG_${DATE}_${TIME}_000-hd5"
           HY_URL="https://opendata.dwd.de/weather/radar/composite/hymecng/${HY_FILE}"
 
-          # HymecNG-Datei im Hintergrund pollen, waehrend PX250 laeuft
+          # HymecNG-Datei im Hintergrund pollen, waehrend PX250 laeuft.
+          # Startet bewusst erst SLOT + 180 s (Datei kommt spaeter, vorher evtl. unvollstaendig).
+          # Das Warten kostet nichts extra: PX250 laeuft in dieser Zeit schon.
           (
+            TARGET=$(( SLOT_EPOCH + 180 ))
+            NOW=$(date -u +%s)
+            if [ "$NOW" -lt "$TARGET" ]; then
+              echo "[HymecNG] Warte $(( TARGET - NOW )) s bis SLOT+180 s ..."
+              sleep $(( TARGET - NOW ))
+            fi
             for i in $(seq 1 80); do
               CODE=$(curl -s -o "$RUNNER_TEMP/hy.tmp" -w "%{http_code}" --connect-timeout 10 --max-time 60 "$HY_URL" || echo 000)
               if [ "$CODE" = "200" ] && [ -s "$RUNNER_TEMP/hy.tmp" ]; then
