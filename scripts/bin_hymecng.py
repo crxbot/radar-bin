@@ -38,18 +38,18 @@ FILENAME_RE = re.compile(r"composite_HymecNG_(\d{8})_(\d{4})_(\d{3})-hd5")
 HAIL_CLASSES = {9, 10}
 
 RAIN_MMH_THRESHOLDS: list[tuple[float, float, int]] = [
-    (0.06, 0.1, 30),
+    (0.015, 0.1, 30),
     (0.1, 1.25, 31),
     (1.25, 10.0, 32),
     (10.0, float("inf"), 33),
 ]
 SNOW_MMH_THRESHOLDS: list[tuple[float, float, int]] = [
-    (0.06, 1.0, 71),
+    (0.015, 1.0, 71),
     (1.0, 4.0, 72),
     (4.0, float("inf"), 73),
 ]
 SLEET_MMH_THRESHOLDS: list[tuple[float, float, int]] = [
-    (0.06, 1.0, 61),
+    (0.015, 1.0, 61),
     (1.0, float("inf"), 62),
 ]
 
@@ -58,7 +58,7 @@ SLEET_TYPE_CODES = {6, 61, 62}
 FREEZING_RAIN_TYPE_CODES = {4, 5}
 HAIL_TYPE_CODES = {9, 10}
 
-MIN_PRECIP_RATE_MMH = 0.06   # ≈ 8 dBZ
+MIN_PRECIP_RATE_MMH = 0.015   # ≈ 0 dBZ
 
 NODATA_CLASS = -1
 NODATA_BYTE = 255
@@ -79,7 +79,7 @@ BERLIN = ZoneInfo("Europe/Berlin")
 #   bis ca. 41 dBZ: Z = 300 * R^1.4,  darüber: Z = 77 * R^1.9
 ZR_LOW_A, ZR_LOW_B = 300.0, 1.4
 ZR_HIGH_A, ZR_HIGH_B = 77.0, 1.9
-DBZ_MIN_RAIN = 8.0    # unter 8 dBZ -> 0 mm/h
+DBZ_MIN_RAIN = 0.0    # unter 8 dBZ -> 0 mm/h
 HX_FACTOR = 4           # 250 m -> 1 km
 HX_MAX_DBZ: float | None = 55.0   # Kappung (Hagel-Kontamination); None = aus
 HX_DEFAULT_GAIN = 0.5            # nur Fallback
