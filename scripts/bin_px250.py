@@ -33,8 +33,8 @@ SITES = ["asb", "boo", "drs", "eis", "ess", "fbg", "fld", "hnr", "isn",
 SRC_DIR = Path("data/px250")
 OUT_DIR = Path("output/px250")
 
-WAIT_SECONDS = 240
-RETRY_SLEEP = 10
+WAIT_SECONDS = 60
+RETRY_SLEEP = 5
 MIN_SITES = 10
 
 COMP_PROJDEF = (
