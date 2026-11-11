@@ -48,7 +48,7 @@ jobs:
       - run: pip install -r requirements.txt
 
       # Kein festes sleep mehr: die Skripte pollen selbst und starten sofort
-      - name: Download + Verarbeitung (PX250 und HymecNG parallel)
+      - name: Download, Verarbeitung und Veroeffentlichung (PX250 und HymecNG parallel)
         run: |
           mkdir -p data/hymecng
           HY_FILE="composite_HymecNG_${DATE}_${TIME}_000-hd5"
@@ -75,19 +75,31 @@ jobs:
           ) &
           HY_PID=$!
 
-          # PX250: schlaegt es fehl, laeuft HymecNG trotzdem (Fallback-Marker im Cache)
-          python scripts/bin_px250.py || echo "::warning::PX250 fehlgeschlagen - HymecNG laeuft im Fallback"
-
-          wait $HY_PID || { echo "::error::HymecNG-Datei nicht verfuegbar"; exit 1; }
-          python scripts/bin_hymecng.py   # nutzt data/cache -> kein zweiter Download
-
-      - name: Veroeffentlichen (beide parallel)
-        run: |
           set +e
-          scripts/publish.sh px250 scripts/meta_px250.py output/px250 px250 & P1=$!
-          scripts/publish.sh liveanalyse scripts/meta_hymecng.py output/hymecng liveanalyse & P2=$!
-          wait $P1; R1=$?
-          wait $P2; R2=$?
-          # HymecNG ist Pflicht; ein fehlendes PX250-Bild (Ausfall) ist nur eine Warnung
-          [ $R1 -ne 0 ] && echo "::warning::PX250 nicht veroeffentlicht"
-          exit $R2
+
+          # PX250: sofort verarbeiten und direkt im Hintergrund hochladen,
+          # waehrend HymecNG noch auf seine Datei wartet.
+          PX_PUB_PID=""
+          if python scripts/bin_px250.py; then
+            bash scripts/publish.sh px250 scripts/meta_px250.py output/px250 px250 &
+            PX_PUB_PID=$!
+          else
+            echo "::warning::PX250 fehlgeschlagen - HymecNG laeuft im Fallback"
+          fi
+
+          # HymecNG ist Pflicht: Download abwarten, verarbeiten, veroeffentlichen
+          if ! wait $HY_PID; then
+            echo "::error::HymecNG-Datei nicht verfuegbar"
+            RC=1
+          elif python scripts/bin_hymecng.py \
+               && bash scripts/publish.sh liveanalyse scripts/meta_hymecng.py output/hymecng liveanalyse; then
+            RC=0
+          else
+            RC=1
+          fi
+
+          # PX250-Upload noch abwarten; ein Fehler dort ist nur eine Warnung
+          if [ -n "$PX_PUB_PID" ]; then
+            wait $PX_PUB_PID || echo "::warning::PX250 nicht veroeffentlicht"
+          fi
+          exit $RC
