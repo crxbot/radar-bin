@@ -14,7 +14,9 @@ import argparse
 import os
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -33,8 +35,13 @@ SITES = ["asb", "boo", "drs", "eis", "ess", "fbg", "fld", "hnr", "isn",
 SRC_DIR = Path("data/px250")
 OUT_DIR = Path("output/px250")
 
-WAIT_SECONDS = 60
-RETRY_SLEEP = 5
+CACHE_DIR = Path("data/cache")   # Komposit-Cache: hymecng nutzt das fertige PX250-Komposit statt neu zu laden
+
+WAIT_SECONDS = 150      # harte Obergrenze fuer das Warten auf Standorte
+POLL_SECONDS = 3        # Abstand zwischen zwei Abfragen pro Standort (jeder Standort pollt parallel)
+LIST_EVERY = 5          # nur jede 5. Abfrage das Verzeichnis listen, sonst direkt die Datei per Namensschema probieren
+QUORUM = 15             # sind so viele Standorte da ...
+GRACE_SECONDS = 20      # ... wartet man auf die Nachzuegler nur noch so lange
 MIN_SITES = 10
 
 COMP_PROJDEF = (
@@ -83,49 +90,93 @@ def get_slot(cli_time):
 # --------------------------------------------------------------------------- #
 # Download
 # --------------------------------------------------------------------------- #
-def find_file(site, stamp):
-    r = requests.get(f"{BASE_URL}/{site}/", timeout=30)
+_HREF_RE = re.compile(r'href="([^"]+)"')
+_NAME_STAMP_RE = re.compile(r"-(\d{14})-de")
+
+
+def list_names(site, session):
+    r = session.get(f"{BASE_URL}/{site}/", timeout=30)
     r.raise_for_status()
-    m = re.search(r'href="([^"]*-' + stamp + r'-de[^"]*)"', r.text)
-    return m.group(1) if m else None
+    return _HREF_RE.findall(r.text)
+
+
+class _Progress:
+    """Gemeinsamer Zustand aller Standort-Threads: ab QUORUM Standorten laeuft nur noch eine kurze Nachfrist."""
+
+    def __init__(self, hard_deadline):
+        self.lock = threading.Lock()
+        self.hard = hard_deadline
+        self.soft = None
+        self.done = 0
+
+    def mark_done(self):
+        with self.lock:
+            self.done += 1
+            if self.soft is None and self.done >= QUORUM:
+                self.soft = time.time() + GRACE_SECONDS
+
+    def expired(self):
+        now = time.time()
+        return now >= self.hard or (self.soft is not None and now >= self.soft)
+
+
+def fetch_site(site, stamp, progress):
+    """Ein Standort: pollt, bis die Datei da ist (oder die Frist ablaeuft). Gibt (site, Pfad|None) zurueck."""
+    dest_dir = SRC_DIR / site
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    cached = next(iter(dest_dir.glob(f"*-{stamp}-de*")), None)
+    if cached is not None:
+        progress.mark_done()
+        return site, cached
+
+    session = requests.Session()
+    template = None          # Dateiname mit {stamp}-Platzhalter, aus einem frueheren Verzeichnis-Listing gelernt
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            name = None
+            if template and attempt % LIST_EVERY:
+                name = template.replace("{stamp}", stamp)         # billig: direkt die erwartete Datei probieren
+            else:
+                names = list_names(site, session)                 # selten: Verzeichnis listen
+                hit = [n for n in names if f"-{stamp}-de" in n]
+                if hit:
+                    name = hit[0]
+                stamps = [(m.group(1), n) for n in names for m in [_NAME_STAMP_RE.search(n)] if m]
+                if stamps:
+                    old, ref = max(stamps)
+                    template = ref.replace(old, "{stamp}", 1)
+
+            if name:
+                r = session.get(f"{BASE_URL}/{site}/{name}", timeout=60)
+                if r.status_code == 200 and r.content:
+                    dest = dest_dir / name
+                    tmp = dest.with_suffix(".part")
+                    tmp.write_bytes(r.content)
+                    tmp.replace(dest)
+                    print(f"[{site}] {name} (Versuch {attempt})")
+                    progress.mark_done()
+                    return site, dest
+        except Exception as e:
+            print(f"[{site}] Versuch {attempt}: {e}")
+
+        if progress.expired():
+            return site, None
+        time.sleep(POLL_SECONDS)
 
 
 def download_all(slot):
+    """Alle Standorte PARALLEL laden. Jeder Thread pollt selbststaendig, kein gemeinsames Sleep."""
     stamp = slot.strftime("%Y%m%d%H%M") + "00"
-    files = {}
-    deadline = time.time() + WAIT_SECONDS
-    attempt = 0
+    progress = _Progress(time.time() + WAIT_SECONDS)
+    with ThreadPoolExecutor(max_workers=len(SITES)) as ex:
+        results = dict(ex.map(lambda s: fetch_site(s, stamp, progress), SITES))
 
-    while True:
-        attempt += 1
-        for site in SITES:
-            if site in files:
-                continue
-            dest_dir = SRC_DIR / site
-            try:
-                name = find_file(site, stamp)
-                if not name:
-                    continue
-                dest = dest_dir / name
-                if not dest.exists():
-                    dest_dir.mkdir(parents=True, exist_ok=True)
-                    r = requests.get(f"{BASE_URL}/{site}/{name}", timeout=60)
-                    r.raise_for_status()
-                    dest.write_bytes(r.content)
-                files[site] = dest
-                print(f"[{site}] {name}")
-            except Exception as e:
-                print(f"[{site}] Versuch {attempt}: {e}")
-
-        missing = [s for s in SITES if s not in files]
-        if not missing:
-            break
-        if time.time() >= deadline:
-            print(f"Nicht verfuegbar nach {WAIT_SECONDS} s: {', '.join(missing)}")
-            break
-        print(f"Versuch {attempt}: noch {len(missing)} fehlen ({', '.join(missing)}) - warte {RETRY_SLEEP} s")
-        time.sleep(RETRY_SLEEP)
-
+    files = {s: p for s, p in results.items() if p}
+    missing = [s for s in SITES if s not in files]
+    if missing:
+        print(f"Nicht verfuegbar: {', '.join(missing)}")
     if len(files) < MIN_SITES:
         raise RuntimeError(f"Nur {len(files)} von {len(SITES)} Standorten (min. {MIN_SITES}) - Abbruch.")
     print(f"{len(files)}/{len(SITES)} Standorte vorhanden")
@@ -347,6 +398,30 @@ def build_composite(slot, method="weighted"):
     return compose_bands(placed, method)
 
 
+def build_composite_cached(slot, method="weighted"):
+    """Wie build_composite, aber pro Slot nur EINMAL pro Runner: Ergebnis (oder Fehlschlag) wird
+    in data/cache abgelegt. hymecng laedt dadurch nichts mehr nach und wartet nicht ein zweites Mal."""
+    stamp = slot.strftime("%Y%m%d%H%M")
+    ok_path = CACHE_DIR / f"px250_comp_{method}_{stamp}.npz"
+    fail_path = CACHE_DIR / f"px250_comp_{method}_{stamp}.failed"
+    if ok_path.exists():
+        print(f"PX250-Komposit aus Cache: {ok_path}")
+        with np.load(ok_path) as d:
+            return d["comp"], d["cover"]
+    if fail_path.exists():
+        raise RuntimeError(f"PX250 schon gescheitert: {fail_path.read_text()}")
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        comp, cover = build_composite(slot, method)
+    except RuntimeError as e:
+        fail_path.write_text(str(e))
+        raise
+    tmp = ok_path.with_name(ok_path.name + ".tmp.npz")
+    np.savez(tmp, comp=comp, cover=cover)      # unkomprimiert = schnell
+    tmp.replace(ok_path)
+    return comp, cover
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -360,7 +435,7 @@ def main():
     slot = get_slot(args.time)
     print(f"Slot: {slot:%Y-%m-%d %H:%M} UTC")
 
-    comp, cover = build_composite(slot, args.method)
+    comp, cover = build_composite_cached(slot, args.method)
     codes = encode_codes(comp, cover)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)

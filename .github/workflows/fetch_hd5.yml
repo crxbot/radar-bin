@@ -4,214 +4,82 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # verhindert, dass zwei Laeufe gleichzeitig dieselben Dateien generieren/hochladen
   group: radar-pipeline
   cancel-in-progress: false
 
 env:
-  # so viele Timesteps sollen pro Pipeline im R2-Bucket max. gleichzeitig liegen
   MAX_KEEP: 12
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # 1) Zeitslot einmalig bestimmen, damit beide Pipelines exakt denselben Slot nutzen
-  # ---------------------------------------------------------------------------
-  prepare:
+  # EIN Job statt Matrix: PX250-Komposit wird nur einmal geladen/berechnet und von HymecNG wiederverwendet
+  radar:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
-    outputs:
-      date: ${{ steps.slot.outputs.date }}
-      time: ${{ steps.slot.outputs.time }}
-      berlin_date: ${{ steps.slot.outputs.berlin_date }}
-      berlin_time: ${{ steps.slot.outputs.berlin_time }}
-      run: ${{ steps.slot.outputs.run }}
-      slot_epoch: ${{ steps.slot.outputs.slot_epoch }}
-    steps:
-      - name: Set RUN and DATE (rounded to 5 min, UTC)
-        id: slot
-        run: |
-          NOW=$(date -u +%s)
-          SLOT_EPOCH=$(( NOW / 300 * 300 ))
-
-          TIME=$(date -u -d "@$SLOT_EPOCH" +%H%M)
-          DATE=$(date -u -d "@$SLOT_EPOCH" +%Y%m%d)
-          BERLIN_TIME=$(TZ=Europe/Berlin date -d "@$SLOT_EPOCH" +%H%M)
-          BERLIN_DATE=$(TZ=Europe/Berlin date -d "@$SLOT_EPOCH" +%Y%m%d)
-
-          {
-            echo "date=$DATE"
-            echo "time=$TIME"
-            echo "berlin_date=$BERLIN_DATE"
-            echo "berlin_time=$BERLIN_TIME"
-            echo "run=${DATE}_${TIME}"
-            echo "slot_epoch=$SLOT_EPOCH"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "UTC-Slot: ${DATE}_${TIME} | Berlin: ${BERLIN_DATE}_${BERLIN_TIME}"
-
-  # ---------------------------------------------------------------------------
-  # 2) LiveAnalyse und RegenRadar laufen parallel, jeweils mit eigenem Generate-Skript
-  # ---------------------------------------------------------------------------
-  pipeline:
-    name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
-    needs: prepare
-    timeout-minutes: 12 # Sicherheitsnetz (inkl. 3 min Wartezeit bei LiveAnalyse)
-    strategy:
-      fail-fast: false # eine fehlgeschlagene Pipeline stoppt die andere nicht
-      matrix:
-        include:
-          # PX250: 17 Standort-Radare zu einem Komposit, Download macht das Skript selbst
-          - name: px250
-            script: scripts/bin_px250.py
-            meta_script: scripts/meta_px250.py
-            out_dir: output/px250
-            file_prefix: px250
-            source: px250
-            start_offset: 60
-          # HymecNG + HX kommen spaeter -> Download startet erst 180 s nach dem Slot (:03, :08, :13 ...)
-          - name: liveanalyse
-            script: scripts/bin_hymecng.py
-            meta_script: scripts/meta_hymecng.py
-            out_dir: output/hymecng
-            file_prefix: liveanalyse
-            source: live
-            start_offset: 180
+    timeout-minutes: 10
     env:
-      RUN: ${{ needs.prepare.outputs.run }}
-      DATE: ${{ needs.prepare.outputs.date }}
-      TIME: ${{ needs.prepare.outputs.time }}
-      BERLIN_DATE: ${{ needs.prepare.outputs.berlin_date }}
-      BERLIN_TIME: ${{ needs.prepare.outputs.berlin_time }}
-      # Matrix-Werte als Umgebungsvariablen, damit die Shell-Skripte lesbar bleiben
-      NAME: ${{ matrix.name }}
-      SCRIPT: ${{ matrix.script }}
-      OUT_DIR: ${{ matrix.out_dir }}
-      META_SCRIPT: ${{ matrix.meta_script }}
-      FILE_PREFIX: ${{ matrix.file_prefix }}
-      SOURCE: ${{ matrix.source }}
-      START_OFFSET: ${{ matrix.start_offset }}
-      SLOT_EPOCH: ${{ needs.prepare.outputs.slot_epoch }}
-      # R2: Praefix = Pipeline-Name (liveanalyse / regenradar), Dateien heissen <name>_<datum>_<zeit>
-      R2_PREFIX: ${{ matrix.name }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
       R2_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: auto # von R2 erwartet, vermeidet Region-Warnungen
+      AWS_DEFAULT_REGION: auto
 
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v7
+      - name: Zeitslot bestimmen (5 min, UTC)
+        run: |
+          NOW=$(date -u +%s)
+          SLOT_EPOCH=$(( NOW / 300 * 300 ))
+          {
+            echo "SLOT_EPOCH=$SLOT_EPOCH"
+            echo "DATE=$(date -u -d "@$SLOT_EPOCH" +%Y%m%d)"
+            echo "TIME=$(date -u -d "@$SLOT_EPOCH" +%H%M)"
+            echo "BERLIN_DATE=$(TZ=Europe/Berlin date -d "@$SLOT_EPOCH" +%Y%m%d)"
+            echo "BERLIN_TIME=$(TZ=Europe/Berlin date -d "@$SLOT_EPOCH" +%H%M)"
+            echo "RUN=$(date -u -d "@$SLOT_EPOCH" +%Y%m%d_%H%M)"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v7
         with:
           token: ${{ secrets.LIVE_PAT }}
 
-      - name: Setup Python
-        uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
-      # Wartet (nur LiveAnalyse) bis SLOT + START_OFFSET; Checkout/pip laufen davor schon
-      - name: Warten bis Start-Zeitpunkt
+      # Kein festes sleep mehr: die Skripte pollen selbst und starten sofort
+      - name: Download + Verarbeitung (PX250 und HymecNG parallel)
         run: |
-          TARGET=$(( SLOT_EPOCH + START_OFFSET ))
-          NOW=$(date -u +%s)
-          if [ "$NOW" -lt "$TARGET" ]; then
-            echo "Warte $(( TARGET - NOW )) s bis $(date -u -d "@$TARGET" +%H:%M:%S) UTC ..."
-            sleep $(( TARGET - NOW ))
-          else
-            echo "Start-Zeitpunkt schon erreicht - weiter."
-          fi
+          mkdir -p data/hymecng
+          HY_FILE="composite_HymecNG_${DATE}_${TIME}_000-hd5"
+          HY_URL="https://opendata.dwd.de/weather/radar/composite/hymecng/${HY_FILE}"
 
-      - name: Download Quelldaten (mit Retry)
-        run: |
-          MAX_ATTEMPTS=50
-          SLEEP_SECONDS=5
-
-          download_plain() {
-            local label="$1" url="$2" out_dir="$3" file_name="$4"
-            local out="${out_dir}/${file_name}" tmp="${RUNNER_TEMP}/${file_name}"
-            mkdir -p "$out_dir"
-            for i in $(seq 1 "$MAX_ATTEMPTS"); do
-              HTTP_CODE=$(curl -s -o "$tmp" -w "%{http_code}" \
-                --connect-timeout 10 --max-time 120 "$url" || echo "000")
-              if [ "$HTTP_CODE" = "200" ] && [ -s "$tmp" ]; then
-                mv "$tmp" "$out"
-                echo "[$label] Erfolgreich (Versuch $i/$MAX_ATTEMPTS): $out"
-                return 0
+          # HymecNG-Datei im Hintergrund pollen, waehrend PX250 laeuft
+          (
+            for i in $(seq 1 80); do
+              CODE=$(curl -s -o "$RUNNER_TEMP/hy.tmp" -w "%{http_code}" --connect-timeout 10 --max-time 60 "$HY_URL" || echo 000)
+              if [ "$CODE" = "200" ] && [ -s "$RUNNER_TEMP/hy.tmp" ]; then
+                mv "$RUNNER_TEMP/hy.tmp" "data/hymecng/$HY_FILE"; echo "[HymecNG] da (Versuch $i)"; exit 0
               fi
-              echo "[$label] Versuch $i/$MAX_ATTEMPTS: Datei noch nicht verfuegbar (HTTP $HTTP_CODE)."
-              rm -f "$tmp"
-              sleep "$SLEEP_SECONDS"
+              sleep 3
             done
-            echo "::error::[$label] ${file_name} nach $MAX_ATTEMPTS Versuchen nicht verfuegbar - Abbruch."
-            return 1
-          }
+            exit 1
+          ) &
+          HY_PID=$!
 
-          if [ "$SOURCE" = "px250" ]; then
-            # PX250-Standortdaten laedt das Python-Skript selbst (17 Dateien, mit Warten/Retry)
-            echo "PX250: Download macht das Skript selbst."
-          else
-            HY_FILE="composite_HymecNG_${DATE}_${TIME}_000-hd5"
-            download_plain HymecNG "https://opendata.dwd.de/weather/radar/composite/hymecng/${HY_FILE}" data/hymecng "$HY_FILE"
-          fi
+          # PX250: schlaegt es fehl, laeuft HymecNG trotzdem (Fallback-Marker im Cache)
+          python scripts/bin_px250.py || echo "::warning::PX250 fehlgeschlagen - HymecNG laeuft im Fallback"
 
-      - name: Generate data (${{ matrix.name }})
-        run: python "$SCRIPT"
+          wait $HY_PID || { echo "::error::HymecNG-Datei nicht verfuegbar"; exit 1; }
+          python scripts/bin_hymecng.py   # nutzt data/cache -> kein zweiter Download
 
-      - name: Download bestehende metadata.json aus R2 (falls vorhanden)
+      - name: Veroeffentlichen (beide parallel)
         run: |
-          aws s3 cp \
-            "s3://${R2_BUCKET}/${R2_PREFIX}/metadata.json" \
-            ./metadata_prev.json \
-            --endpoint-url "$R2_ENDPOINT" \
-            || echo "Keine bestehende metadata.json in R2 gefunden - starte frisch."
-
-      - name: Build metadata.json (mit bestehendem Stand mergen, auf ${{ env.MAX_KEEP }} Timesteps kuerzen)
-        run: |
-          python "$META_SCRIPT" output \
-            --run "$RUN" \
-            --date "$BERLIN_DATE" \
-            --existing ./metadata_prev.json \
-            --max-keep "$MAX_KEEP" \
-            --meta-out ./metadata.json \
-            --removed-out ./removed_files.txt
-
-      - name: Gzip der Binaerdatei
-        run: |
-          f="${OUT_DIR}/${FILE_PREFIX}_${BERLIN_DATE}_${BERLIN_TIME}"
-          gzip -9 -n -c "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-
-      - name: Upload neue Binaerdatei zu R2
-        run: |
-          aws s3 cp \
-            "${OUT_DIR}/${FILE_PREFIX}_${BERLIN_DATE}_${BERLIN_TIME}" \
-            "s3://${R2_BUCKET}/${R2_PREFIX}/${FILE_PREFIX}_${BERLIN_DATE}_${BERLIN_TIME}" \
-            --content-type application/gzip \
-            --endpoint-url "$R2_ENDPOINT"
-
-      # metadata.json erst nach der Binaerdatei, damit Clients nie auf fehlende Dateien verweisen
-      - name: Upload aktualisierte metadata.json zu R2
-        run: |
-          aws s3 cp \
-            ./metadata.json \
-            "s3://${R2_BUCKET}/${R2_PREFIX}/metadata.json" \
-            --endpoint-url "$R2_ENDPOINT"
-
-      - name: Aus dem Fenster gefallene alte Dateien aus R2 loeschen
-        run: |
-          if [ -s ./removed_files.txt ]; then
-            while IFS= read -r fname || [ -n "$fname" ]; do
-              [ -z "$fname" ] && continue
-              echo "Loesche $fname aus R2 ..."
-              aws s3 rm \
-                "s3://${R2_BUCKET}/${R2_PREFIX}/$fname" \
-                --endpoint-url "$R2_ENDPOINT"
-            done < ./removed_files.txt
-          else
-            echo "Nichts zu loeschen - Fenster noch nicht voll oder unveraendert."
-          fi
+          set +e
+          scripts/publish.sh px250 scripts/meta_px250.py output/px250 px250 & P1=$!
+          scripts/publish.sh liveanalyse scripts/meta_hymecng.py output/hymecng liveanalyse & P2=$!
+          wait $P1; R1=$?
+          wait $P2; R2=$?
+          # HymecNG ist Pflicht; ein fehlendes PX250-Bild (Ausfall) ist nur eine Warnung
+          [ $R1 -ne 0 ] && echo "::warning::PX250 nicht veroeffentlicht"
+          exit $R2

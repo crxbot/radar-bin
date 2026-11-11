@@ -18,7 +18,7 @@ import requests
 from pyproj import Transformer
 from scipy import ndimage
 
-from bin_px250 import COMP_PROJDEF, LL_X, LL_Y, build_composite   # liegt im selben scripts/-Ordner
+from bin_px250 import COMP_PROJDEF, LL_X, LL_Y, build_composite_cached   # liegt im selben scripts/-Ordner
 
 # --------------------------------------------------------------------------- #
 # Konfiguration
@@ -58,7 +58,7 @@ SLEET_TYPE_CODES = {6, 61, 62}
 FREEZING_RAIN_TYPE_CODES = {4, 5}
 HAIL_TYPE_CODES = {9, 10}
 
-MIN_PRECIP_RATE_MMH = 0.024   # ≈ 0 dBZ
+MIN_PRECIP_RATE_MMH = 0.024
 
 NODATA_CLASS = -1
 NODATA_BYTE = 255
@@ -271,7 +271,7 @@ def load_px250_rate_native(ts: datetime, class_grid: dict) -> np.ndarray:
     Gemessen, aber kein Echo = 0 mm/h (zaehlt im Mittel mit),
     keine Radardaten = NaN (zaehlt nicht mit).
     """
-    comp, cover = build_composite(ts)      # Komposit liegt im selben Raster wie frueher HX (4400 x 4800)
+    comp, cover = build_composite_cached(ts)      # Komposit liegt im selben Raster wie frueher HX (4400 x 4800)
 
     h, w = comp.shape
     fct = HX_FACTOR
