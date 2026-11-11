@@ -7,6 +7,7 @@ Dateigroesse immer exakt xsize * ysize = 1.320.000 Bytes.
 """
 import json
 import re
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -527,6 +528,13 @@ def main() -> None:
     out_path = OUT_DIR / f"liveanalyse_{ts.astimezone(BERLIN):%Y%m%d_%H%M}"
     np.ascontiguousarray(out_codes).tofile(out_path)
     print(f"Gespeichert: {out_path} ({w}x{h}, {out_codes.nbytes} Bytes)")
+
+    # liveanalyse_latest: identische Rohdaten ohne Zeitstempel (Client holt immer diese Datei).
+    # Eigene Datei -> bleibt unkomprimiert, auch wenn publish.sh das Archiv-File gzippt.
+    # Passt nicht auf das Schema <name>_<datum>_<zeit>, wird von meta_hymecng.py also ignoriert.
+    latest_path = OUT_DIR / "liveanalyse_latest"
+    shutil.copyfile(out_path, latest_path)
+    print(f"Gespeichert: {latest_path}")
 
     # Metadaten fuer den Client (einmalig kopieren, aendern sich nicht)
     ll_x, ll_y = to_proj.transform(grid["ll_lon"], grid["ll_lat"])
