@@ -41,7 +41,7 @@ HAIL_CLASSES = {9, 10}
 RAIN_MMH_THRESHOLDS: list[tuple[float, float, int]] = [
     (0.019, 0.1, 30),
     (0.1, 0.4, 31),
-    (1.25, 5.1, 32),
+    (0.4, 5.1, 32),
     (5.1, float("inf"), 33),
 ]
 SNOW_MMH_THRESHOLDS: list[tuple[float, float, int]] = [
