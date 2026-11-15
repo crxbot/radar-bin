@@ -72,7 +72,7 @@ LIGHTNING_WINDOW_MINUTES = 5
 # Native Pixel sind 1 km. Frueher 8 px im Web-Mercator-Bild (~0,65 km/px bei 50 N)
 # -> ca. 5 km Radius -> hier 5 Pixel.
 LIGHTNING_MARKER_RADIUS_PX = 5
-LIGHTNING_PRECIP_MMH_THRESHOLD = 0.1
+LIGHTNING_PRECIP_MMH_THRESHOLD = 0.019
 
 BERLIN = ZoneInfo("Europe/Berlin")
 
