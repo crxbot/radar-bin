@@ -31,7 +31,8 @@ LATEST="${OUT_DIR}/${FILE_PREFIX}_latest"
 if [ "$NAME" = "liveanalyse" ] && [ -f "$LATEST" ]; then
   aws s3 cp "$LATEST" "s3://${R2_BUCKET}/hymecng/${FILE_PREFIX}_latest" \
     --content-type application/octet-stream --cache-control "no-cache" \
-    --metadata "timestamp=$(date -u -d "@$SLOT_EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
+    --metadata "timestamp=$(date -u -d "@$SLOT_EPOCH" +%Y-%m-%dT%H:%M:%SZ)" \
+    "${EP[@]}"
 fi
 
 # metadata erst NACH der Binaerdatei, damit Clients nie auf fehlende Dateien verweisen
